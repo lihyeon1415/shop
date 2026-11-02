@@ -125,79 +125,89 @@ def prepare_data(raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     cancel_mask = data["InvoiceNo"].str.upper().str.startswith("C") | data["Quantity"].lt(0)
     cancellations = data.loc[cancel_mask].copy()
     cancellations["CancelQuantity"] = cancellations["Quantity"].abs()
-    cancellations["Week"] = cancellations["InvoiceDate"].dt.to_period("W-SUN").dt.start_time
-    cancel_weekly = (
-        cancellations.groupby(["StockCode", "Week"], as_index=False)["CancelQuantity"]
+    cancellations["Date"] = cancellations["InvoiceDate"].dt.normalize()
+    cancel_daily = (
+        cancellations.groupby(["StockCode", "Date"], as_index=False)["CancelQuantity"]
         .sum()
     )
 
     sales = data.loc[~cancel_mask & data["Quantity"].gt(0) & data["UnitPrice"].gt(0)].copy()
     service_mask = sales["Description"].str.upper().str.contains(EXCLUDED_SERVICE_WORDS, regex=True, na=False)
     sales = sales.loc[~service_mask]
-    sales["Week"] = sales["InvoiceDate"].dt.to_period("W-SUN").dt.start_time
-    weekly = sales.groupby(["StockCode", "Week"], as_index=False).agg(
+    sales["Date"] = sales["InvoiceDate"].dt.normalize()
+    daily = sales.groupby(["StockCode", "Date"], as_index=False).agg(
         SalesQuantity=("Quantity", "sum"),
         Description=("Description", lambda values: values.mode().iloc[0] if not values.mode().empty else values.iloc[0]),
     )
-    return weekly, cancel_weekly
+    return daily, cancel_daily
 
 
 def make_features(series: pd.Series) -> pd.DataFrame:
     frame = pd.DataFrame({"target": series.astype(float)})
-    for lag in (1, 2, 4, 8):
+    for lag in (1, 7, 14):
         frame[f"lag_{lag}"] = frame["target"].shift(lag)
-    frame["rolling_4"] = frame["target"].shift(1).rolling(4).mean()
-    frame["week_of_year"] = frame.index.isocalendar().week.astype(int)
+    frame["rolling_7"] = frame["target"].shift(1).rolling(7).mean()
+    frame["day_of_week"] = frame.index.dayofweek
     frame["month"] = frame.index.month
     return frame.dropna()
 
 
-def forecast_product(weekly: pd.DataFrame, product_code: str, horizon: int):
-    product_rows = weekly.loc[weekly["StockCode"].eq(product_code)]
+def forecast_product(daily: pd.DataFrame, product_code: str):
+    product_rows = daily.loc[daily["StockCode"].eq(product_code)]
     if product_rows.empty:
         raise ValueError("선택한 상품의 판매 기록을 찾지 못했어요.")
-    first_week = weekly["Week"].min()
-    last_week = weekly["Week"].max()
-    timeline = pd.date_range(first_week, last_week, freq="W-MON")
-    series = product_rows.set_index("Week")["SalesQuantity"].groupby(level=0).sum().reindex(timeline, fill_value=0)
+    first_date = daily["Date"].min()
+    last_date = daily["Date"].max()
+    timeline = pd.date_range(first_date, last_date, freq="D")
+    series = product_rows.set_index("Date")["SalesQuantity"].groupby(level=0).sum().reindex(timeline, fill_value=0)
     features = make_features(series)
-    if len(features) < 12:
+    if len(features) < 45:
         raise ValueError("이 상품의 기록이 부족해 예측을 만들 수 없어요. 다른 상품을 선택해 주세요.")
 
-    holdout = min(8, max(2, len(features) // 5))
+    holdout = min(28, max(7, len(features) // 5))
     train = features.iloc[:-holdout]
     test = features.iloc[-holdout:]
-    columns = ["lag_1", "lag_2", "lag_4", "lag_8", "rolling_4", "week_of_year", "month"]
+    columns = ["lag_1", "lag_7", "lag_14", "rolling_7", "day_of_week", "month"]
     model = RandomForestRegressor(n_estimators=120, max_depth=7, min_samples_leaf=2, random_state=42, n_jobs=-1)
     model.fit(train[columns], train["target"])
     test_prediction = model.predict(test[columns]).clip(0)
     model_mae = mean_absolute_error(test["target"], test_prediction)
-    baseline_prediction = test["lag_1"].to_numpy()
+    baseline_prediction = test["lag_7"].to_numpy()
     baseline_mae = mean_absolute_error(test["target"], baseline_prediction)
 
     final_model = RandomForestRegressor(n_estimators=120, max_depth=7, min_samples_leaf=2, random_state=42, n_jobs=-1)
     final_model.fit(features[columns], features["target"])
     future_values = list(series.astype(float).to_numpy())
-    future_dates = pd.date_range(series.index[-1] + pd.Timedelta(days=7), periods=horizon, freq="W-MON")
-    future_predictions = []
-    for future_date in future_dates:
+    last_known_date = series.index[-1]
+    days_until_monday = (7 - last_known_date.weekday()) % 7 or 7
+    first_forecast_date = last_known_date + pd.Timedelta(days=days_until_monday)
+    week_dates = pd.date_range(first_forecast_date, periods=7, freq="D")
+    all_future_dates = pd.date_range(last_known_date + pd.Timedelta(days=1), week_dates[-1], freq="D")
+    predictions_by_date = {}
+    for future_date in all_future_dates:
         row = {
             "lag_1": future_values[-1],
-            "lag_2": future_values[-2],
-            "lag_4": future_values[-4],
-            "lag_8": future_values[-8],
-            "rolling_4": sum(future_values[-4:]) / 4,
-            "week_of_year": int(future_date.isocalendar().week),
+            "lag_7": future_values[-7],
+            "lag_14": future_values[-14],
+            "rolling_7": sum(future_values[-7:]) / 7,
+            "day_of_week": future_date.dayofweek,
             "month": future_date.month,
         }
         prediction = max(0.0, float(final_model.predict(pd.DataFrame([row])[columns])[0]))
-        future_predictions.append(prediction)
         future_values.append(prediction)
-    return series, test, test_prediction, baseline_mae, model_mae, future_dates, future_predictions
+        if future_date in week_dates:
+            predictions_by_date[future_date] = prediction
+    weekday_names = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    forecast = pd.DataFrame({
+        "날짜": week_dates,
+        "요일": [weekday_names[day] for day in week_dates.dayofweek],
+        "예상 판매량 (개)": [predictions_by_date[date] for date in week_dates],
+    })
+    return series, test, test_prediction, baseline_mae, model_mae, forecast
 
 
 st.title("상품별 판매 수요 예측")
-st.write("실제 온라인 소매 거래 기록을 불러와 상품별 주간 판매량을 학습하고, 다음 주 판매 수량을 예측합니다. 확인된 품목은 한글명으로 표시하고, 상품 코드로 원본과 대조할 수 있습니다.")
+st.write("실제 온라인 소매 거래 기록을 바탕으로 다음 월요일부터 일요일까지의 상품별 판매량을 요일별로 예측합니다. 확인된 품목은 한글명으로 표시하고 상품 코드로 원본과 대조할 수 있습니다.")
 st.caption("예측 대상은 실제 판매 수량입니다. 재고 부족으로 판매하지 못한 수요까지 포함하는 값은 아닙니다.")
 
 with st.sidebar:
@@ -213,18 +223,18 @@ try:
     else:
         raw_data = load_uci_data()
         source_label = "UCI Online Retail II 원본 데이터"
-    weekly_sales, weekly_cancellations = prepare_data(raw_data)
+    daily_sales, daily_cancellations = prepare_data(raw_data)
 except Exception as exc:
     st.error("데이터를 불러오지 못했어요. 인터넷 연결을 확인하거나 UCI에서 내려받은 Excel 파일을 직접 올려주세요.")
     st.caption(f"자세한 내용: {exc}")
     st.stop()
 
-st.caption(f"사용 데이터: {source_label} · 판매 기록 {len(weekly_sales):,}개 · 취소 기록 {len(weekly_cancellations):,}개")
+st.caption(f"사용 데이터: {source_label} · 일별 판매 기록 {len(daily_sales):,}개 · 취소 기록 {len(daily_cancellations):,}개")
 
-product_totals = weekly_sales.groupby("StockCode")["SalesQuantity"].sum().sort_values(ascending=False)
+product_totals = daily_sales.groupby("StockCode")["SalesQuantity"].sum().sort_values(ascending=False)
 product_codes = product_totals.head(30).index.tolist()
 product_names = (
-    weekly_sales.sort_values("Week").groupby("StockCode")["Description"].last().to_dict()
+    daily_sales.sort_values("Date").groupby("StockCode")["Description"].last().to_dict()
 )
 with st.sidebar:
     product_code = st.selectbox(
@@ -232,37 +242,46 @@ with st.sidebar:
         product_codes,
         format_func=lambda code: f"{korean_product_name(code, product_names.get(code, ''))} · {code}",
     )
-    horizon = st.slider("예측 기간 (주)", min_value=1, max_value=8, value=4)
+    record_period = st.selectbox("과거 기록 보기", ["최근 한 주", "최근 한 달"])
 
 product_name = korean_product_name(product_code, product_names.get(product_code, ""))
-cancel_total = weekly_cancellations.loc[weekly_cancellations["StockCode"].eq(product_code), "CancelQuantity"].sum()
+cancel_total = daily_cancellations.loc[daily_cancellations["StockCode"].eq(product_code), "CancelQuantity"].sum()
 
 try:
-    series, test, test_prediction, baseline_mae, model_mae, future_dates, future_predictions = forecast_product(
-        weekly_sales, product_code, horizon
+    series, test, test_prediction, baseline_mae, model_mae, forecast = forecast_product(
+        daily_sales, product_code
     )
 except ValueError as exc:
     st.warning(str(exc))
     st.stop()
 
-next_week = round(future_predictions[0])
+next_week = round(forecast["예상 판매량 (개)"].sum())
 average_error = round(model_mae, 1)
 col1, col2, col3 = st.columns(3)
 col1.metric("선택 상품", product_name, help=f"실제 거래 자료의 상품 코드: {product_code}")
-col2.metric("다음 주 예상 판매량", f"{next_week:,}개")
-col3.metric("평가 오차 (MAE)", f"{average_error:,}개", help="학습에 사용하지 않은 마지막 주들의 평균 절대 오차입니다. 낮을수록 예측 오차가 작습니다.")
+col2.metric("다음 주 예상 판매량 합계", f"{next_week:,}개")
+col3.metric("일별 평가 오차 (MAE)", f"{average_error:,}개", help="마지막 평가 기간의 일별 평균 절대 오차입니다. 낮을수록 예측 오차가 작습니다.")
 
-st.subheader("주간 판매량과 예측")
-history = series.tail(20).rename("실제 판매량").to_frame()
-history["모델 예측 (평가 구간)"] = pd.Series(test_prediction, index=test.index).reindex(history.index)
-future_frame = pd.DataFrame({"모델 예측 (미래)": future_predictions}, index=future_dates)
-chart = pd.concat([history, future_frame], axis=0)
-st.line_chart(chart, y_label="수량 (개)", x_label="주 시작일", height=360)
+st.subheader("다음 주 요일별 예상 판매량")
+chart_data = forecast.set_index("요일")[["예상 판매량 (개)"]]
+st.bar_chart(chart_data, y_label="수량 (개)", x_label="요일", height=320)
+st.dataframe(forecast, hide_index=True, use_container_width=True, column_config={"예상 판매량 (개)": st.column_config.NumberColumn(format="%.0f")})
+
+st.subheader("과거 판매 기록")
+history_days = 7 if record_period == "최근 한 주" else 30
+history = series.tail(history_days).rename("실제 판매량 (개)").to_frame()
+weekday_names = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+history["요일"] = [weekday_names[day] for day in history.index.dayofweek]
+st.caption(f"표시 기간: {history.index.min():%Y-%m-%d} ~ {history.index.max():%Y-%m-%d} · {record_period}")
+st.line_chart(history["실제 판매량 (개)"], y_label="판매량 (개)", x_label="날짜", height=260)
+history_table = history.rename_axis("날짜").reset_index()
+history_table["날짜"] = history_table["날짜"].dt.strftime("%Y-%m-%d")
+st.dataframe(history_table[["날짜", "요일", "실제 판매량 (개)"]], hide_index=True, use_container_width=True)
 
 with st.expander("예측 성능과 취소 기록 보기"):
-    st.write(f"최근 {len(test)}주를 평가용으로 남겨 두고, 그 이전 거래로 모델을 학습했어요.")
+    st.write(f"최근 {len(test)}일을 평가용으로 남겨 두고, 그 이전 거래로 모델을 학습했어요.")
     comparison = pd.DataFrame(
-        {"방법": ["최근 주 판매량 그대로 사용", "Random Forest 모델"], "MAE (개)": [round(baseline_mae, 2), round(model_mae, 2)]}
+        {"방법": ["지난주 같은 요일 판매량 사용", "Random Forest 모델"], "일별 MAE (개)": [round(baseline_mae, 2), round(model_mae, 2)]}
     )
     st.dataframe(comparison, hide_index=True, use_container_width=True)
     st.metric("이 상품의 전체 기록상 취소 수량", f"{cancel_total:,.0f}개")
