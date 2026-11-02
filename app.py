@@ -13,6 +13,42 @@ from sklearn.metrics import mean_absolute_error
 UCI_DATA_URL = "https://archive.ics.uci.edu/static/public/502/online+retail+ii.zip"
 UCI_PAGE = "https://archive.ics.uci.edu/dataset/502/online%2Bretail%2Bii"
 EXCLUDED_SERVICE_WORDS = "POSTAGE|BANK CHARGES|DOTCOM|AMAZON FEE|ADJUST BAD DEBT|CARRIAGE|MANUAL"
+PRODUCT_NAMES_KO = {
+    "85048": "15cm 크리스마스 유리 장식볼 조명 세트 (20구)",
+    "79323P": "분홍 체리 장식 조명",
+    "79323W": "흰색 체리 장식 조명",
+    "22041": "7인치 싱글 레코드 액자",
+    "21232": "딸기 모양 도자기 소품 보관함",
+    "22064": "분홍 도넛 모양 소품 보관함",
+    "21871": "환경 보호 머그컵",
+    "21523": "홈 스위트 홈 현관 매트",
+    "22350": "고양이 밥그릇",
+    "85123A": "흰색 하트 걸이형 티라이트 홀더",
+    "71053": "흰색 금속 랜턴",
+    "84406B": "크림색 하트 옷걸이",
+    "84029G": "영국 국기 무늬 뜨개 보온 물주머니",
+    "84029E": "빨간색 하트 무늬 보온 물주머니",
+    "22752": "마트료시카 인형 상자 7개 세트",
+    "21730": "서리 무늬 유리 별 모양 촛대",
+    "22633": "영국 국기 무늬 손난로",
+    "22632": "빨간색 물방울무늬 손난로",
+    "84879": "여러 색상 새 장식품",
+    "85099B": "대형 빨간색 복고풍 점무늬 가방",
+    "22423": "3단 케이크 스탠드",
+    "47566": "파티 가랜드",
+    "20725": "빨간색 복고풍 점무늬 도시락 가방",
+    "22197": "팝콘 용기",
+    "21212": "복고풍 점무늬 컵케이크 종이틀 72개 묶음",
+    "23084": "토끼 모양 수면등",
+    "22961": "잼 만들기 세트",
+}
+
+
+def korean_product_name(code: str, original_name: str) -> str:
+    translated = PRODUCT_NAMES_KO.get(str(code).strip())
+    if translated:
+        return translated
+    return f"상품 코드 {code} (한글 상품명 미등록)"
 
 st.set_page_config(page_title="상품 판매 수요 예측", page_icon="📦", layout="wide")
 
@@ -161,7 +197,7 @@ def forecast_product(weekly: pd.DataFrame, product_code: str, horizon: int):
 
 
 st.title("상품별 판매 수요 예측")
-st.write("실제 온라인 소매 거래 기록을 불러와 상품별 주간 판매량을 학습하고, 다음 주 판매 수량을 예측합니다.")
+st.write("실제 온라인 소매 거래 기록을 불러와 상품별 주간 판매량을 학습하고, 다음 주 판매 수량을 예측합니다. 확인된 품목은 한글명으로 표시하고, 상품 코드로 원본과 대조할 수 있습니다.")
 st.caption("예측 대상은 실제 판매 수량입니다. 재고 부족으로 판매하지 못한 수요까지 포함하는 값은 아닙니다.")
 
 with st.sidebar:
@@ -194,11 +230,11 @@ with st.sidebar:
     product_code = st.selectbox(
         "상품 선택 (거래 자료에 실제 등록된 상품)",
         product_codes,
-        format_func=lambda code: f"{product_names.get(code, '상품명 미기재')} · {code}",
+        format_func=lambda code: f"{korean_product_name(code, product_names.get(code, ''))} · {code}",
     )
     horizon = st.slider("예측 기간 (주)", min_value=1, max_value=8, value=4)
 
-product_name = product_names.get(product_code, "상품명 미기재")
+product_name = korean_product_name(product_code, product_names.get(product_code, ""))
 cancel_total = weekly_cancellations.loc[weekly_cancellations["StockCode"].eq(product_code), "CancelQuantity"].sum()
 
 try:
