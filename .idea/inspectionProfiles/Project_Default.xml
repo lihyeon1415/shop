@@ -1,0 +1,26 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="alembic" />
+          <option value="blinker" />
+          <option value="click" />
+          <option value="Flask" />
+          <option value="Flask-Migrate" />
+          <option value="Flask-SQLAlchemy" />
+          <option value="greenlet" />
+          <option value="itsdangerous" />
+          <option value="Jinja2" />
+          <option value="Mako" />
+          <option value="MarkupSafe" />
+          <option value="python-dotenv" />
+          <option value="SQLAlchemy" />
+          <option value="typing_extensions" />
+          <option value="Werkzeug" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
